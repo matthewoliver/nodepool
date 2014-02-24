@@ -26,13 +26,18 @@ import fakeprovider
 from task_manager import Task, TaskManager
 
 
+SERVER_LIST_AGE = 5   # How long to keep a cached copy of the server list
+ITERATE_INTERVAL = 2  # How long to sleep while waiting for something
+                      # in a loop
+
+
 def iterate_timeout(max_seconds, purpose):
     start = time.time()
     count = 0
     while (time.time() < start + max_seconds):
         count += 1
         yield count
-        time.sleep(2)
+        time.sleep(ITERATE_INTERVAL)
     raise Exception("Timeout waiting for %s" % purpose)
 
 
@@ -57,7 +62,7 @@ def get_public_ip(server, version=4):
 
 
 def make_server_dict(server):
-    d = dict(id=server.id,
+    d = dict(id=str(server.id),
              name=server.name,
              status=server.status,
              addresses=server.addresses)
@@ -72,7 +77,7 @@ def make_server_dict(server):
 
 
 def make_image_dict(image):
-    d = dict(id=image.id, name=image.name, status=image.status,
+    d = dict(id=str(image.id), name=image.name, status=image.status,
              metadata=image.metadata)
     if hasattr(image, 'progress'):
         d['progress'] = image.progress
@@ -86,7 +91,7 @@ class NotFound(Exception):
 class CreateServerTask(Task):
     def main(self, client):
         server = client.servers.create(**self.args)
-        return server.id
+        return str(server.id)
 
 
 class GetServerTask(Task):
@@ -117,7 +122,7 @@ class AddKeypairTask(Task):
 class ListKeypairsTask(Task):
     def main(self, client):
         keys = client.keypairs.list()
-        return [dict(id=key.id, name=key.name) for
+        return [dict(id=str(key.id), name=key.name) for
                 key in keys]
 
 
@@ -129,7 +134,7 @@ class DeleteKeypairTask(Task):
 class CreateFloatingIPTask(Task):
     def main(self, client):
         ip = client.floating_ips.create(**self.args)
-        return dict(id=ip.id, ip=ip.ip)
+        return dict(id=str(ip.id), ip=ip.ip)
 
 
 class AddFloatingIPTask(Task):
@@ -140,13 +145,14 @@ class AddFloatingIPTask(Task):
 class GetFloatingIPTask(Task):
     def main(self, client):
         ip = client.floating_ips.get(self.args['ip_id'])
-        return dict(id=ip.id, ip=ip.ip, instance_id=ip.instance_id)
+        return dict(id=str(ip.id), ip=ip.ip, instance_id=str(ip.instance_id))
 
 
 class ListFloatingIPsTask(Task):
     def main(self, client):
         ips = client.floating_ips.list()
-        return [dict(id=ip.id, ip=ip.ip, instance_id=ip.instance_id) for
+        return [dict(id=str(ip.id), ip=ip.ip,
+                     instance_id=str(ip.instance_id)) for
                 ip in ips]
 
 
@@ -163,7 +169,7 @@ class DeleteFloatingIPTask(Task):
 class CreateImageTask(Task):
     def main(self, client):
         # This returns an id
-        return client.servers.create_image(**self.args)
+        return str(client.servers.create_image(**self.args))
 
 
 class GetImageTask(Task):
@@ -178,6 +184,23 @@ class GetImageTask(Task):
         return make_image_dict(image)
 
 
+class ListExtensionsTask(Task):
+    def main(self, client):
+        try:
+            resp, body = client.client.get('/extensions')
+            return [x['alias'] for x in body['extensions']]
+        except novaclient.exceptions.NotFound:
+            # No extensions present.
+            return []
+
+
+class ListFlavorsTask(Task):
+    def main(self, client):
+        flavors = client.flavors.list()
+        return [dict(id=str(flavor.id), ram=flavor.ram, name=flavor.name)
+                for flavor in flavors]
+
+
 class ListImagesTask(Task):
     def main(self, client):
         images = client.images.list()
@@ -187,7 +210,7 @@ class ListImagesTask(Task):
 class FindImageTask(Task):
     def main(self, client):
         image = client.images.find(**self.args)
-        return dict(id=image.id)
+        return dict(id=str(image.id))
 
 
 class DeleteImageTask(Task):
@@ -203,9 +226,29 @@ class ProviderManager(TaskManager):
                                               provider.rate)
         self.provider = provider
         self._client = self._getClient()
-        self._flavors = self._getFlavors()
         self._images = {}
-        self._extensions = self._getExtensions()
+        self._cloud_metadata_read = False
+        self.__flavors = {}
+        self.__extensions = {}
+        self._servers = []
+        self._servers_time = 0
+
+    @property
+    def _flavors(self):
+        if not self._cloud_metadata_read:
+            self._getCloudMetadata()
+        return self.__flavors
+
+    @property
+    def _extensions(self):
+        if not self._cloud_metadata_read:
+            self._getCloudMetadata()
+        return self.__extensions
+
+    def _getCloudMetadata(self):
+        self.__flavors = self._getFlavors()
+        self.__extensions = self.listExtensions()
+        self._cloud_metadata_read = True
 
     def _getClient(self):
         args = ['1.1', self.provider.username, self.provider.password,
@@ -222,26 +265,13 @@ class ProviderManager(TaskManager):
         return novaclient.client.Client(*args, **kwargs)
 
     def _getFlavors(self):
-        try:
-            l = [dict(id=f.id, ram=f.ram, name=f.name)
-                 for f in self._client.flavors.list()]
-            l.sort(lambda a, b: cmp(a['ram'], b['ram']))
-            return l
-        except Exception:
-            # requests.ConnectionError exceptions bubble up through
-            # novaclient, making them hard to match on
-            self.log.exception('Unable to get flavors for %s'
-                               % self.provider.name)
-            return []
-
-    def _getExtensions(self):
-        try:
-            resp, body = self._client.client.get('/extensions')
-            return [x['alias'] for x in body['extensions']]
-        except novaclient.exceptions.NotFound:
-            return []
+        flavors = self.listFlavors()
+        flavors.sort(lambda a, b: cmp(a['ram'], b['ram']))
+        return flavors
 
     def hasExtension(self, extension):
+        # Note: this will throw an error if the provider is offline
+        # but all the callers are in threads so the mainloop won't be affected.
         if extension in self._extensions:
             return True
         return False
@@ -251,6 +281,9 @@ class ProviderManager(TaskManager):
         return task.wait()
 
     def findFlavor(self, min_ram, name_filter=None):
+        # Note: this will throw an error if the provider is offline
+        # but all the callers are in threads (they call in via CreateServer) so
+        # the mainloop won't be affected.
         for f in self._flavors:
             if (f['ram'] >= min_ram
                     and (not name_filter or name_filter in f['name'])):
@@ -300,33 +333,35 @@ class ProviderManager(TaskManager):
     def getFloatingIP(self, ip_id):
         return self.submitTask(GetFloatingIPTask(ip_id=ip_id))
 
+    def getServerFromList(self, server_id):
+        for s in self.listServers():
+            if s['id'] == server_id:
+                return s
+        raise NotFound()
+
     def _waitForResource(self, resource_type, resource_id, timeout):
-        last_progress = None
         last_status = None
         for count in iterate_timeout(timeout,
                                      "waiting for %s %s" % (resource_type,
                                                             resource_id)):
             try:
                 if resource_type == 'server':
-                    resource = self.getServer(resource_id)
+                    resource = self.getServerFromList(resource_id)
                 elif resource_type == 'image':
                     resource = self.getImage(resource_id)
-            except:
+            except NotFound:
+                continue
+            except Exception:
                 self.log.exception('Unable to list %ss while waiting for '
                                    '%s will retry' % (resource_type,
                                                       resource_id))
                 continue
 
-            # In Rackspace v1.0, there is no progress attribute while queued
-            progress = resource.get('progress')
             status = resource.get('status')
-            if (last_progress != progress or
-                last_status != status):
-                self.log.debug('Status of %s %s: %s %s' %
-                               (resource_type, resource_id,
-                                status, progress))
+            if (last_status != status):
+                self.log.debug('Status of %s %s: %s' %
+                               (resource_type, resource_id, status))
             last_status = status
-            last_progress = progress
             if status == 'ACTIVE':
                 return resource
 
@@ -363,8 +398,14 @@ class ProviderManager(TaskManager):
     def getImage(self, image_id):
         return self.submitTask(GetImageTask(image=image_id))
 
+    def listExtensions(self):
+        return self.submitTask(ListExtensionsTask())
+
     def listImages(self):
         return self.submitTask(ListImagesTask())
+
+    def listFlavors(self):
+        return self.submitTask(ListFlavorsTask())
 
     def listFloatingIPs(self):
         return self.submitTask(ListFloatingIPsTask())
@@ -377,13 +418,23 @@ class ProviderManager(TaskManager):
         return self.submitTask(DeleteFloatingIPTask(ip_id=ip_id))
 
     def listServers(self):
-        return self.submitTask(ListServersTask())
+        if time.time() - self._servers_time >= SERVER_LIST_AGE:
+            self._servers = self.submitTask(ListServersTask())
+            self._servers_time = time.time()
+        return self._servers
 
     def deleteServer(self, server_id):
         return self.submitTask(DeleteServerTask(server_id=server_id))
 
     def cleanupServer(self, server_id):
-        server = self.getServer(server_id)
+        try:
+            server = self.getServerFromList(server_id)
+        except NotFound:
+            # In case this server is really new, make sure we have at
+            # least one server list update since it was created.  If
+            # it still doesn't exist, then propogate the exception.
+            time.sleep(SERVER_LIST_AGE + 1)
+            server = self.getServerFromList(server_id)
 
         if self.hasExtension('os-floating-ips'):
             for ip in self.listFloatingIPs():
@@ -407,6 +458,6 @@ class ProviderManager(TaskManager):
         for count in iterate_timeout(600, "waiting for server %s deletion" %
                                      server_id):
             try:
-                self.getServer(server_id)
+                self.getServerFromList(server_id)
             except NotFound:
                 return

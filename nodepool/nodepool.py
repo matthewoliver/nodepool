@@ -22,6 +22,7 @@ import gear
 import json
 import logging
 import os.path
+import re
 import threading
 import time
 import yaml
@@ -36,14 +37,15 @@ import provider_manager
 MINS = 60
 HOURS = 60 * MINS
 
-WATERMARK_SLEEP = 5          # Interval between checking if new servers needed
+WATERMARK_SLEEP = 10         # Interval between checking if new servers needed
 IMAGE_TIMEOUT = 6 * HOURS    # How long to wait for an image save
 CONNECT_TIMEOUT = 10 * MINS  # How long to try to connect after a server
                              # is ACTIVE
 NODE_CLEANUP = 8 * HOURS     # When to start deleting a node that is not
                              # READY or HOLD
 TEST_CLEANUP = 5 * MINS      # When to start deleting a node that is in TEST
-KEEP_OLD_IMAGE = 24 * HOURS  # How long to keep an old (good) image
+IMAGE_CLEANUP = 8 * HOURS    # When to start deleting an image that is not
+                             # READY or is not the current or previous image
 DELETE_DELAY = 1 * MINS      # Delay before deleting a node that has completed
                              # its job.
 
@@ -124,7 +126,7 @@ class NodeCompleteThread(threading.Thread):
             statsd.incr(key + '.builds')
 
         time.sleep(DELETE_DELAY)
-        self.nodepool.deleteNode(session, node)
+        self.nodepool.deleteNode(node.id)
 
 
 class NodeUpdateListener(threading.Thread):
@@ -185,8 +187,10 @@ class NodeUpdateListener(threading.Thread):
                 self.log.debug("Test job for node id: %s started" % node.id)
                 return
 
-            self.log.info("Setting node id: %s to USED" % node.id)
-            node.state = nodedb.USED
+            # Preserve the HOLD state even if a job starts on the node.
+            if node.state != nodedb.HOLD:
+                self.log.info("Setting node id: %s to USED" % node.id)
+                node.state = nodedb.USED
             self.nodepool.updateStats(session, node.provider_name)
 
     def handleCompletePhase(self, nodename, jobname, result, branch):
@@ -247,6 +251,24 @@ class GearmanClient(gear.Client):
         return needed_workers
 
 
+class NodeDeleter(threading.Thread):
+    log = logging.getLogger("nodepool.NodeDeleter")
+
+    def __init__(self, nodepool, node_id):
+        threading.Thread.__init__(self, name='NodeDeleter for %s' % node_id)
+        self.node_id = node_id
+        self.nodepool = nodepool
+
+    def run(self):
+        try:
+            with self.nodepool.getDB().getSession() as session:
+                node = session.getNode(self.node_id)
+                self.nodepool._deleteNode(session, node)
+        except Exception:
+            self.log.exception("Exception deleting node %s:" %
+                               self.node_id)
+
+
 class NodeLauncher(threading.Thread):
     log = logging.getLogger("nodepool.NodeLauncher")
 
@@ -282,7 +304,7 @@ class NodeLauncher(threading.Thread):
                 self.log.exception("Exception launching node id: %s:" %
                                    self.node_id)
                 try:
-                    self.nodepool.deleteNode(session, self.node)
+                    self.nodepool.deleteNode(self.node_id)
                 except Exception:
                     self.log.exception("Exception deleting node id: %s:" %
                                        self.node_id)
@@ -449,9 +471,19 @@ class ImageUpdater(threading.Thread):
             key = None
             use_password = True
 
+        uuid_pattern = 'hex{8}-(hex{4}-){3}hex{12}'.replace('hex',
+                                                            '[0-9a-fA-F]')
+        if re.match(uuid_pattern, self.image.base_image):
+            image_name = None
+            image_id = self.image.base_image
+        else:
+            image_name = self.image.base_image
+            image_id = None
         server_id = self.manager.createServer(
-            hostname, self.image.min_ram, image_name=self.image.base_image,
-            key_name=key_name, name_filter=self.image.name_filter)
+            hostname, self.image.min_ram, image_name=image_name,
+            key_name=key_name, name_filter=self.image.name_filter,
+            image_id=image_id)
+
         self.snap_image.hostname = hostname
         self.snap_image.version = timestamp
         self.snap_image.server_external_id = server_id
@@ -595,6 +627,8 @@ class NodePool(threading.Thread):
         self.zmq_context = None
         self.gearman_client = None
         self.apsched = None
+        self._delete_threads = {}
+        self._delete_threads_lock = threading.Lock()
 
     def stop(self):
         self._stopped = True
@@ -622,7 +656,7 @@ class NodePool(threading.Thread):
 
         for name, default in [
             ('image-update', '14 2 * * *'),
-            ('cleanup', '27 */6 * * *'),
+            ('cleanup', '* * * * *'),
             ('check', '*/15 * * * *'),
             ]:
             c = Cron()
@@ -944,7 +978,7 @@ class NodePool(threading.Thread):
                     ar = allocation.AllocationRequest(image.name,
                                                       image_demand[image.name])
 
-                nodes = session.getNodes(image_name=image_name,
+                nodes = session.getNodes(image_name=image.name,
                                          target_name=target.name)
                 allocation_requests[image.name] = ar
                 ar.addTarget(at, image.min_ready, len(nodes))
@@ -979,17 +1013,34 @@ class NodePool(threading.Thread):
         self.log.debug("Finished node launch calculation")
         return nodes_to_launch
 
+    def updateConfig(self):
+        config = self.loadConfig()
+        self.reconfigureDatabase(config)
+        self.reconfigureManagers(config)
+        self.reconfigureCrons(config)
+        self.reconfigureUpdateListeners(config)
+        self.reconfigureGearmanClient(config)
+        self.setConfig(config)
+
+    def startup(self):
+        self.updateConfig()
+        # Currently nodepool can not resume building a node after a
+        # restart.  To clean up, mark all building nodes for deletion
+        # when the daemon starts.
+        with self.getDB().getSession() as session:
+            for node in session.getNodes(state=nodedb.BUILDING):
+                self.log.info("Setting building node id: %s to delete "
+                              "on startup" % node.id)
+                node.state = nodedb.DELETE
+
     def run(self):
+        try:
+            self.startup()
+        except Exception:
+            self.log.exception("Exception in startup:")
         while not self._stopped:
             try:
-                config = self.loadConfig()
-                self.reconfigureDatabase(config)
-                self.reconfigureManagers(config)
-                self.reconfigureCrons(config)
-                self.reconfigureUpdateListeners(config)
-                self.reconfigureGearmanClient(config)
-                self.setConfig(config)
-
+                self.updateConfig()
                 with self.getDB().getSession() as session:
                     self._run(session)
             except Exception:
@@ -1059,6 +1110,13 @@ class NodePool(threading.Thread):
                 self.updateImage(session, provider, image)
 
     def updateImage(self, session, provider, image):
+        try:
+            self._updateImage(session, provider, image)
+        except Exception:
+            self.log.exception(
+                "Could not update image %s on %s", image.name, provider.name)
+
+    def _updateImage(self, session, provider, image):
         provider = self.config.providers[provider.name]
         image = provider.images[image.name]
         snap_image = session.createSnapshotImage(
@@ -1072,6 +1130,13 @@ class NodePool(threading.Thread):
         return t
 
     def launchNode(self, session, provider, image, target):
+        try:
+            self._launchNode(session, provider, image, target)
+        except Exception:
+            self.log.exception(
+                "Could not launch node %s on %s", image.name, provider.name)
+
+    def _launchNode(self, session, provider, image, target):
         provider = self.config.providers[provider.name]
         image = provider.images[image.name]
         timeout = provider.boot_timeout
@@ -1079,7 +1144,24 @@ class NodePool(threading.Thread):
         t = NodeLauncher(self, provider, image, target, node.id, timeout)
         t.start()
 
-    def deleteNode(self, session, node):
+    def deleteNode(self, node_id):
+        try:
+            self._delete_threads_lock.acquire()
+            if node_id in self._delete_threads:
+                return
+            t = NodeDeleter(self, node_id)
+            self._delete_threads[node_id] = t
+            t.start()
+        except Exception:
+            self.log.exception("Could not delete node %s", node_id)
+        finally:
+            self._delete_threads_lock.release()
+
+    def _deleteNode(self, session, node):
+        self.log.debug("Deleting node id: %s which has been in %s "
+                       "state for %s hours" %
+                       (node.id, nodedb.STATE_NAMES[node.state],
+                        (time.time() - node.state_time) / (60 * 60)))
         # Delete a node
         if node.state != nodedb.DELETE:
             # Don't write to the session if not needed.
@@ -1098,11 +1180,9 @@ class NodePool(threading.Thread):
 
         if node.external_id:
             try:
-                server = manager.getServer(node.external_id)
                 self.log.debug('Deleting server %s for node id: %s' %
-                               (node.external_id,
-                                node.id))
-                manager.cleanupServer(server['id'])
+                               (node.external_id, node.id))
+                manager.cleanupServer(node.external_id)
             except provider_manager.NotFound:
                 pass
 
@@ -1159,6 +1239,11 @@ class NodePool(threading.Thread):
         # old images.
 
         self.log.debug("Starting periodic cleanup")
+
+        for k, t in self._delete_threads.items()[:]:
+            if not t.isAlive():
+                del self._delete_threads[k]
+
         node_ids = []
         image_ids = []
         with self.getDB().getSession() as session:
@@ -1171,7 +1256,8 @@ class NodePool(threading.Thread):
             try:
                 with self.getDB().getSession() as session:
                     node = session.getNode(node_id)
-                    self.cleanupOneNode(session, node)
+                    if node:
+                        self.cleanupOneNode(session, node)
             except Exception:
                 self.log.exception("Exception cleaning up node id %s:" %
                                    node_id)
@@ -1189,37 +1275,27 @@ class NodePool(threading.Thread):
     def cleanupOneNode(self, session, node):
         now = time.time()
         time_in_state = now - node.state_time
-        if (node.state in [nodedb.READY, nodedb.HOLD] or
-            time_in_state < 900):
+        if (node.state in [nodedb.READY, nodedb.HOLD]):
             return
         delete = False
         if (node.state == nodedb.DELETE):
-            self.log.warning("Deleting node id: %s which is in delete "
-                             "state" % node.id)
             delete = True
         elif (node.state == nodedb.TEST and
               time_in_state > TEST_CLEANUP):
-            self.log.warning("Deleting node id: %s which has been in %s "
-                             "state for %s hours" %
-                             (node.id, node.state,
-                              (now - node.state_time) / (60 * 60)))
             delete = True
         elif time_in_state > NODE_CLEANUP:
-            self.log.warning("Deleting node id: %s which has been in %s "
-                             "state for %s hours" %
-                             (node.id, node.state,
-                              time_in_state / (60 * 60)))
             delete = True
         if delete:
             try:
-                self.deleteNode(session, node)
+                self.deleteNode(node.id)
             except Exception:
                 self.log.exception("Exception deleting node id: "
                                    "%s" % node.id)
 
     def cleanupOneImage(self, session, image):
         # Normally, reap images that have sat in their current state
-        # for 24 hours, unless the image is the current snapshot
+        # for 8 hours, unless the image is the current or previous
+        # snapshot.
         delete = False
         now = time.time()
         if image.provider_name not in self.config.providers:
@@ -1232,12 +1308,17 @@ class NodePool(threading.Thread):
             self.log.info("Deleting image id: %s which has no current "
                           "base image" % image.id)
         else:
-            current = session.getCurrentSnapshotImage(image.provider_name,
-                                                      image.image_name)
-            if (current and image != current and
-                (now - image.state_time) > KEEP_OLD_IMAGE):
-                self.log.info("Deleting non-current image id: %s because "
-                              "the image is %s hours old" %
+            images = session.getOrderedReadySnapshotImages(
+                image.provider_name, image.image_name)
+            current = previous = None
+            if len(images) > 0:
+                current = images[0]
+            if len(images) > 1:
+                previous = images[1]
+            if (image != current and image != previous and
+                (now - image.state_time) > IMAGE_CLEANUP):
+                self.log.info("Deleting image id: %s which is "
+                              "%s hours old" %
                               (image.id,
                                (now - image.state_time) / (60 * 60)))
                 delete = True
@@ -1273,7 +1354,7 @@ class NodePool(threading.Thread):
             except Exception:
                 self.log.exception("SSH Check failed for node id: %s" %
                                    node.id)
-                self.deleteNode(session, node)
+                self.deleteNode(node.id)
         self.log.debug("Finished periodic check")
 
     def updateStats(self, session, provider_name):
