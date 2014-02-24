@@ -510,6 +510,7 @@ class ImageUpdater(threading.Thread):
         ssh_kwargs = dict(log=log)
         if not use_password:
             ssh_kwargs['pkey'] = key
+            self.log.info("Key: %s", key)
         else:
             ssh_kwargs['password'] = server['admin_pass']
 
@@ -630,7 +631,7 @@ class NodePool(threading.Thread):
             c.job = None
             c.timespec = config.get('cron', {}).get(name, default)
 
-        for addr in config['zmq-publishers']:
+        for addr in config.get('zmq-publishers', []):
             z = ZMQPublisher()
             z.name = addr
             z.listener = None
@@ -680,15 +681,17 @@ class NodePool(threading.Thread):
             t = Target()
             t.name = target['name']
             newconfig.targets[t.name] = t
-            jenkins = target.get('jenkins')
+            jenkins = target.get('jenkins', {})
             t.online = True
             if jenkins:
+                t.jenkins_target = True
                 t.jenkins_url = jenkins['url']
                 t.jenkins_user = jenkins['user']
                 t.jenkins_apikey = jenkins['apikey']
                 t.jenkins_credentials_id = jenkins.get('credentials-id')
                 t.jenkins_test_job = jenkins.get('test-job')
             else:
+                t.jenkins_target = False
                 t.jenkins_url = None
                 t.jenkins_user = None
                 t.jenkins_apikey = None
@@ -756,16 +759,21 @@ class NodePool(threading.Thread):
             if oldmanager:
                 config.jenkins_managers[t.name] = oldmanager
             else:
-                self.log.debug("Creating new JenkinsManager object for %s" %
-                               t.name)
-                config.jenkins_managers[t.name] = \
-                    jenkins_manager.JenkinsManager(t)
-                config.jenkins_managers[t.name].start()
+                # Not all targets are Jenkins targets anymore. So lets see if 
+                # need a target (jenkins) manager. 
+                if t.jenkins_target: 
+                    self.log.debug("Creating new JenkinsManager object for %s" %
+                                   t.name)
+                    config.jenkins_managers[t.name] = \
+                        jenkins_manager.JenkinsManager(t)
+                    config.jenkins_managers[t.name].start()
         for oldmanager in stop_managers:
             oldmanager.stop()
 
         for t in config.targets.values():
             try:
+                if not t.jenkins_target:
+                    continue
                 info = config.jenkins_managers[t.name].getInfo()
                 if info['quietingDown']:
                     self.log.info("Target %s is offline" % t.name)
@@ -810,7 +818,7 @@ class NodePool(threading.Thread):
             running = set()
 
         configured = set(config.zmq_publishers.keys())
-        if running == configured:
+        if running == configured and self.config:
             self.log.debug("ZMQ Listeners do not need to be updated")
             config.zmq_publishers = self.config.zmq_publishers
             return

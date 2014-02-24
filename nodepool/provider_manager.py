@@ -210,7 +210,7 @@ class ProviderManager(TaskManager):
     def _getClient(self):
         args = ['1.1', self.provider.username, self.provider.password,
                 self.provider.project_id, self.provider.auth_url]
-        kwargs = {}
+        kwargs = {'auth_system': 'keystone'}
         if self.provider.service_type:
             kwargs['service_type'] = self.provider.service_type
         if self.provider.service_name:
