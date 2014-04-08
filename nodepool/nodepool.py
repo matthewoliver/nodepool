@@ -37,16 +37,16 @@ import provider_manager
 MINS = 60
 HOURS = 60 * MINS
 
-WATERMARK_SLEEP = 10         # Interval between checking if new servers needed
-IMAGE_TIMEOUT = 6 * HOURS    # How long to wait for an image save
+WATERMARK_SLEEP = 10  # Interval between checking if new servers needed
+IMAGE_TIMEOUT = 6 * HOURS  # How long to wait for an image save
 CONNECT_TIMEOUT = 10 * MINS  # How long to try to connect after a server
                              # is ACTIVE
-NODE_CLEANUP = 8 * HOURS     # When to start deleting a node that is not
+NODE_CLEANUP = 8 * HOURS  # When to start deleting a node that is not
                              # READY or HOLD
-TEST_CLEANUP = 5 * MINS      # When to start deleting a node that is in TEST
-IMAGE_CLEANUP = 8 * HOURS    # When to start deleting an image that is not
+TEST_CLEANUP = 5 * MINS  # When to start deleting a node that is in TEST
+IMAGE_CLEANUP = 8 * HOURS  # When to start deleting an image that is not
                              # READY or is not the current or previous image
-DELETE_DELAY = 1 * MINS      # Delay before deleting a node that has completed
+DELETE_DELAY = 1 * MINS  # Delay before deleting a node that has completed
                              # its job.
 
 
@@ -54,7 +54,7 @@ class NodeCompleteThread(threading.Thread):
     log = logging.getLogger("nodepool.NodeCompleteThread")
 
     def __init__(self, nodepool, nodename, jobname, result, branch):
-        threading.Thread.__init__(self, name='NodeCompleteThread for %s' %
+        threading.Thread.__init__(self, name='NodeCompleteThread for %s' % 
                                   nodename)
         self.nodename = nodename
         self.nodepool = nodepool
@@ -67,37 +67,37 @@ class NodeCompleteThread(threading.Thread):
             with self.nodepool.getDB().getSession() as session:
                 self.handleEvent(session)
         except Exception:
-            self.log.exception("Exception handling event for %s:" %
+            self.log.exception("Exception handling event for %s:" % 
                                self.nodename)
 
     def handleEvent(self, session):
         node = session.getNodeByNodename(self.nodename)
         if not node:
-            self.log.debug("Unable to find node with nodename: %s" %
+            self.log.debug("Unable to find node with nodename: %s" % 
                            self.nodename)
             return
 
         if node.state == nodedb.HOLD:
-            self.log.info("Node id: %s is complete but in HOLD state" %
+            self.log.info("Node id: %s is complete but in HOLD state" % 
                           node.id)
             return
 
         target = self.nodepool.config.targets[node.target_name]
         if self.jobname == target.jenkins_test_job:
-            self.log.debug("Test job for node id: %s complete, result: %s" %
+            self.log.debug("Test job for node id: %s complete, result: %s" % 
                            (node.id, self.result))
             if self.result == 'SUCCESS':
                 jenkins = self.nodepool.getJenkinsManager(target)
                 old = jenkins.relabelNode(node.nodename, [node.image_name])
                 if not old:
                     old = '[unlabeled]'
-                self.log.info("Relabeled jenkins node id: %s from %s to %s" %
+                self.log.info("Relabeled jenkins node id: %s from %s to %s" % 
                               (node.id, old, node.image_name))
                 node.state = nodedb.READY
                 self.log.info("Node id: %s is ready" % node.id)
                 self.nodepool.updateStats(session, node.provider_name)
                 return
-            self.log.info("Node id: %s failed acceptance test, deleting" %
+            self.log.info("Node id: %s failed acceptance test, deleting" % 
                           node.id)
 
         if statsd and self.result == 'SUCCESS':
@@ -171,14 +171,14 @@ class NodeUpdateListener(threading.Thread):
                 branch = 'unknown_branch'
             self.handleCompletePhase(nodename, jobname, result, branch)
         else:
-            raise Exception("Received job for unhandled phase: %s" %
+            raise Exception("Received job for unhandled phase: %s" % 
                             topic)
 
     def handleStartPhase(self, nodename, jobname):
         with self.nodepool.getDB().getSession() as session:
             node = session.getNodeByNodename(nodename)
             if not node:
-                self.log.debug("Unable to find node with nodename: %s" %
+                self.log.debug("Unable to find node with nodename: %s" % 
                                nodename)
                 return
 
@@ -239,14 +239,14 @@ class GearmanClient(gear.Client):
                             needed_workers.get(worker, 0) + queued)
                 elif queued > 0:
                     job = function
-                    unspecified_jobs[job] = (unspecified_jobs.get(job, 0) +
+                    unspecified_jobs[job] = (unspecified_jobs.get(job, 0) + 
                                              queued)
         for job, queued in unspecified_jobs.items():
             workers = job_worker_map.get(job)
             if not workers:
                 continue
             worker = workers[0]
-            needed_workers[worker] = (needed_workers.get(worker, 0) +
+            needed_workers[worker] = (needed_workers.get(worker, 0) + 
                                       queued)
         return needed_workers
 
@@ -265,7 +265,7 @@ class NodeDeleter(threading.Thread):
                 node = session.getNode(self.node_id)
                 self.nodepool._deleteNode(session, node)
         except Exception:
-            self.log.exception("Exception deleting node %s:" %
+            self.log.exception("Exception deleting node %s:" % 
                                self.node_id)
 
 
@@ -301,12 +301,12 @@ class NodeLauncher(threading.Thread):
             try:
                 self.launchNode(session)
             except Exception:
-                self.log.exception("Exception launching node id: %s:" %
+                self.log.exception("Exception launching node id: %s:" % 
                                    self.node_id)
                 try:
                     self.nodepool.deleteNode(self.node_id)
                 except Exception:
-                    self.log.exception("Exception deleting node id: %s:" %
+                    self.log.exception("Exception deleting node id: %s:" % 
                                        self.node_id)
                     return
 
@@ -322,7 +322,7 @@ class NodeLauncher(threading.Thread):
         snap_image = session.getCurrentSnapshotImage(
             self.provider.name, self.image.name)
         if not snap_image:
-            raise Exception("Unable to find current snapshot image %s in %s" %
+            raise Exception("Unable to find current snapshot image %s in %s" % 
                             (self.image.name, self.provider.name))
 
         self.log.info("Creating server with hostname %s in %s from image %s "
@@ -334,11 +334,11 @@ class NodeLauncher(threading.Thread):
         self.node.external_id = server_id
         session.commit()
 
-        self.log.debug("Waiting for server %s for node id: %s" %
+        self.log.debug("Waiting for server %s for node id: %s" % 
                        (server_id, self.node.id))
         server = self.manager.waitForServer(server_id)
         if server['status'] != 'ACTIVE':
-            raise Exception("Server %s for node id: %s status: %s" %
+            raise Exception("Server %s for node id: %s status: %s" % 
                             (server_id, self.node.id, server['status']))
 
         ip = server.get('public_v4')
@@ -349,13 +349,25 @@ class NodeLauncher(threading.Thread):
             raise Exception("Unable to find public IP of server")
 
         self.node.ip = ip
-        self.log.debug("Node id: %s is running, ip: %s, testing ssh" %
+        self.log.debug("Node id: %s is running, ip: %s, testing ssh" % 
                        (self.node.id, ip))
         connect_kwargs = dict(key_filename=self.image.private_key)
         if not utils.ssh_connect(ip, self.image.username,
                                  connect_kwargs=connect_kwargs,
                                  timeout=self.timeout):
             raise Exception("Unable to connect via ssh")
+
+        if self.image.run_on_node:
+            host = utils.ssh_connect(ip, self.image.username,
+                                     connect_kwargs=connect_kwargs,
+                                     timeout=self.timeout)
+            env_vars = ''
+            for k, v in os.environ.items():
+                if k.startswith('NODEPOOL_'):
+                    env_vars += ' %s="%s"' % (k, v)
+            host.ssh("Run script on node",
+                     "%s %s" % 
+                     (env_vars, self.image.run_on_node))
 
         if statsd:
             dt = int((time.time() - start_time) * 1000)
@@ -408,7 +420,7 @@ class ImageUpdater(threading.Thread):
     log = logging.getLogger("nodepool.ImageUpdater")
 
     def __init__(self, nodepool, provider, image, snap_image_id):
-        threading.Thread.__init__(self, name='ImageUpdater for %s' %
+        threading.Thread.__init__(self, name='ImageUpdater for %s' % 
                                   snap_image_id)
         self.provider = provider
         self.image = image
@@ -439,13 +451,13 @@ class ImageUpdater(threading.Thread):
             try:
                 self.updateImage(session)
             except Exception:
-                self.log.exception("Exception updating image %s in %s:" %
+                self.log.exception("Exception updating image %s in %s:" % 
                                    (self.image.name, self.provider.name))
                 try:
                     if self.snap_image:
                         self.nodepool.deleteImage(self.snap_image)
                 except Exception:
-                    self.log.exception("Exception deleting image id: %s:" %
+                    self.log.exception("Exception deleting image id: %s:" % 
                                        self.snap_image.id)
                     return
 
@@ -453,9 +465,9 @@ class ImageUpdater(threading.Thread):
         start_time = time.time()
         timestamp = int(start_time)
 
-        hostname = ('%s-%s.template.openstack.org' %
+        hostname = ('%s-%s.template.openstack.org' % 
                     (self.image.name, str(timestamp)))
-        self.log.info("Creating image id: %s with hostname %s for %s in %s" %
+        self.log.info("Creating image id: %s with hostname %s for %s in %s" % 
                       (self.snap_image.id, hostname, self.image.name,
                        self.provider.name))
         if self.provider.keypair:
@@ -489,11 +501,11 @@ class ImageUpdater(threading.Thread):
         self.snap_image.server_external_id = server_id
         session.commit()
 
-        self.log.debug("Image id: %s waiting for server %s" %
+        self.log.debug("Image id: %s waiting for server %s" % 
                        (self.snap_image.id, server_id))
         server = self.manager.waitForServer(server_id)
         if server['status'] != 'ACTIVE':
-            raise Exception("Server %s for image id: %s status: %s" %
+            raise Exception("Server %s for image id: %s status: %s" % 
                             (server_id, self.snap_image.id, server['status']))
 
         ip = server.get('public_v4')
@@ -509,7 +521,7 @@ class ImageUpdater(threading.Thread):
         image_id = self.manager.createImage(server_id, hostname)
         self.snap_image.external_id = image_id
         session.commit()
-        self.log.debug("Image id: %s building image %s" %
+        self.log.debug("Image id: %s building image %s" % 
                        (self.snap_image.id, image_id))
         # It can take a _very_ long time for Rackspace 1.0 to save an image
         self.manager.waitForImage(image_id, IMAGE_TIMEOUT)
@@ -532,11 +544,11 @@ class ImageUpdater(threading.Thread):
             self.manager.cleanupServer(server_id)
         except:
             self.log.exception("Exception encountered deleting server"
-                               " %s for image id: %s" %
+                               " %s for image id: %s" % 
                                (server_id, self.snap_image.id))
 
     def bootstrapServer(self, server, key, use_password=False):
-        log = logging.getLogger("nodepool.image.build.%s.%s" %
+        log = logging.getLogger("nodepool.image.build.%s.%s" % 
                                 (self.provider.name, self.image.name))
 
         ssh_kwargs = dict(log=log)
@@ -572,7 +584,7 @@ class ImageUpdater(threading.Thread):
                 if k.startswith('NODEPOOL_'):
                     env_vars += ' %s="%s"' % (k, v)
             host.ssh("run setup script",
-                     "cd /opt/nodepool-scripts && %s ./%s" %
+                     "cd /opt/nodepool-scripts && %s ./%s" % 
                      (env_vars, self.image.setup))
 
 
@@ -580,7 +592,7 @@ class ConfigValue(object):
     pass
 
 
-class Config(ConfigValue):
+class Config(ConfigValue):  
     pass
 
 
@@ -710,6 +722,7 @@ class NodePool(threading.Thread):
                 i.username = image.get('username', 'jenkins')
                 i.private_key = image.get('private-key',
                                           '/var/lib/jenkins/.ssh/id_rsa')
+                i.run_on_node = image.get('run-on-node', None)
 
         for target in config['targets']:
             t = Target()
@@ -774,7 +787,7 @@ class NodePool(threading.Thread):
             if oldmanager:
                 config.provider_managers[p.name] = oldmanager
             else:
-                self.log.debug("Creating new ProviderManager object for %s" %
+                self.log.debug("Creating new ProviderManager object for %s" % 
                                p.name)
                 config.provider_managers[p.name] = \
                     provider_manager.ProviderManager(p)
@@ -796,7 +809,7 @@ class NodePool(threading.Thread):
                 # Not all targets are Jenkins targets anymore. So lets see if 
                 # need a target (jenkins) manager. 
                 if t.jenkins_target: 
-                    self.log.debug("Creating new JenkinsManager object for %s" %
+                    self.log.debug("Creating new JenkinsManager object for %s" % 
                                    t.name)
                     config.jenkins_managers[t.name] = \
                         jenkins_manager.JenkinsManager(t)
@@ -942,7 +955,7 @@ class NodePool(threading.Thread):
             ready = n_ready + n_building + n_test
             demand = max(min_demand - ready, 0)
             image_demand[image_name] = demand
-            self.log.debug("  Deficit: %s: %s (start: %s min: %s ready: %s)" %
+            self.log.debug("  Deficit: %s: %s (start: %s min: %s ready: %s)" % 
                            (image_name, demand, start_demand, min_demand,
                             ready))
 
@@ -1059,7 +1072,7 @@ class NodePool(threading.Thread):
                     num_to_launch = nodes_to_launch.get(provider, 0)
                     if num_to_launch:
                         self.log.info("Need to launch %s %s nodes for "
-                                      "%s on %s" %
+                                      "%s on %s" % 
                                       (num_to_launch, image.name,
                                        target.name, provider.name))
                     for i in range(num_to_launch):
@@ -1091,7 +1104,7 @@ class NodePool(threading.Thread):
                                            snap_image.image_name,
                                            snap_image.state)
                     if not found:
-                        self.log.warning("Missing image %s on %s" %
+                        self.log.warning("Missing image %s on %s" % 
                                          (image.name, provider.name))
                         self.updateImage(session, provider, image)
 
@@ -1159,7 +1172,7 @@ class NodePool(threading.Thread):
 
     def _deleteNode(self, session, node):
         self.log.debug("Deleting node id: %s which has been in %s "
-                       "state for %s hours" %
+                       "state for %s hours" % 
                        (node.id, nodedb.STATE_NAMES[node.state],
                         (time.time() - node.state_time) / (60 * 60)))
         # Delete a node
@@ -1180,7 +1193,7 @@ class NodePool(threading.Thread):
 
         if node.external_id:
             try:
-                self.log.debug('Deleting server %s for node id: %s' %
+                self.log.debug('Deleting server %s for node id: %s' % 
                                (node.external_id, node.id))
                 manager.cleanupServer(node.external_id)
             except provider_manager.NotFound:
@@ -1207,12 +1220,12 @@ class NodePool(threading.Thread):
         if snap_image.server_external_id:
             try:
                 server = manager.getServer(snap_image.server_external_id)
-                self.log.debug('Deleting server %s for image id: %s' %
+                self.log.debug('Deleting server %s for image id: %s' % 
                                (snap_image.server_external_id,
                                 snap_image.id))
                 manager.cleanupServer(server['id'])
             except provider_manager.NotFound:
-                self.log.warning('Image server id %s not found' %
+                self.log.warning('Image server id %s not found' % 
                                  snap_image.server_external_id)
 
         if snap_image.external_id:
@@ -1221,7 +1234,7 @@ class NodePool(threading.Thread):
                 self.log.debug('Deleting image %s' % remote_image['id'])
                 manager.deleteImage(remote_image['id'])
             except provider_manager.NotFound:
-                self.log.warning('Image id %s not found' %
+                self.log.warning('Image id %s not found' % 
                                  snap_image.external_id)
 
         snap_image.delete()
@@ -1259,7 +1272,7 @@ class NodePool(threading.Thread):
                     if node:
                         self.cleanupOneNode(session, node)
             except Exception:
-                self.log.exception("Exception cleaning up node id %s:" %
+                self.log.exception("Exception cleaning up node id %s:" % 
                                    node_id)
 
         for image_id in image_ids:
@@ -1268,7 +1281,7 @@ class NodePool(threading.Thread):
                     image = session.getSnapshotImage(image_id)
                     self.cleanupOneImage(session, image)
             except Exception:
-                self.log.exception("Exception cleaning up image id %s:" %
+                self.log.exception("Exception cleaning up image id %s:" % 
                                    image_id)
         self.log.debug("Finished periodic cleanup")
 
@@ -1318,7 +1331,7 @@ class NodePool(threading.Thread):
             if (image != current and image != previous and
                 (now - image.state_time) > IMAGE_CLEANUP):
                 self.log.info("Deleting image id: %s which is "
-                              "%s hours old" %
+                              "%s hours old" % 
                               (image.id,
                                (now - image.state_time) / (60 * 60)))
                 delete = True
@@ -1326,7 +1339,7 @@ class NodePool(threading.Thread):
             try:
                 self.deleteImage(image)
             except Exception:
-                self.log.exception("Exception deleting image id: %s:" %
+                self.log.exception("Exception deleting image id: %s:" % 
                                    image.id)
 
     def _doPeriodicCheck(self):
@@ -1352,7 +1365,7 @@ class NodePool(threading.Thread):
                                      connect_kwargs=connect_kwargs):
                     continue
             except Exception:
-                self.log.exception("SSH Check failed for node id: %s" %
+                self.log.exception("SSH Check failed for node id: %s" % 
                                    node.id)
                 self.deleteNode(node.id)
         self.log.debug("Finished periodic check")
