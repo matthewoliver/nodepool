@@ -899,7 +899,7 @@ class NodePool(threading.Thread):
             c.job = None
             c.timespec = config.get('cron', {}).get(name, default)
 
-        for addr in config['zmq-publishers']:
+        for addr in config.get('zmq-publishers', []):
             z = ZMQPublisher()
             z.name = addr
             z.listener = None
@@ -920,6 +920,7 @@ class NodePool(threading.Thread):
             l.min_ready = label['min-ready']
             l.subnodes = label.get('subnodes', 0)
             l.ready_script = label.get('ready-script')
+            l.ghost_name = label.get('ghost-name')
             l.providers = {}
             for provider in label['providers']:
                 p = LabelProvider()
@@ -963,6 +964,7 @@ class NodePool(threading.Thread):
             t.name = target['name']
             newconfig.targets[t.name] = t
             jenkins = target.get('jenkins')
+            t.ghost_target = target.get('ghost-target')
             t.online = True
             if jenkins:
                 t.jenkins_url = jenkins['url']
@@ -1017,6 +1019,8 @@ class NodePool(threading.Thread):
                 config.provider_managers[p.name].start()
 
         for t in config.targets.values():
+            if t.ghost_target:
+                continue
             oldmanager = None
             if self.config:
                 oldmanager = self.config.jenkins_managers.get(t.name)
@@ -1038,6 +1042,8 @@ class NodePool(threading.Thread):
             oldmanager.stop()
 
         for t in config.targets.values():
+            if t.ghost_target:
+                continue
             try:
                 info = config.jenkins_managers[t.name].getInfo()
                 if info['quietingDown']:
@@ -1085,7 +1091,11 @@ class NodePool(threading.Thread):
         configured = set(config.zmq_publishers.keys())
         if running == configured:
             self.log.debug("ZMQ Listeners do not need to be updated")
-            config.zmq_publishers = self.config.zmq_publishers
+            # ZMQ publishers are now optional, so there is a chance
+            # on startup that both the running and configured sets
+            # will be the same (empty) when the config doesn't exist.
+            if self.config:
+                config.zmq_publishers = self.config.zmq_publishers
             return
 
         if self.zmq_context:
@@ -1211,7 +1221,21 @@ class NodePool(threading.Thread):
                 nodes = session.getNodes(label_name=label.name,
                                          target_name=target.name)
                 allocation_requests[label.name] = ar
-                ar.addTarget(at, len(nodes))
+
+                # If this target is a ghost-target, then we only add it to
+                # the AR if the current label points to this target.
+                if target.ghost_target:
+                    if label.ghost_name and label.ghost_name == target.name:
+                        ar.addTarget(at, len(nodes))
+                    else:
+                        continue
+                else:
+                    # This target isn't a ghost-target, but if the label
+                    # expects one, then we attach no other targets.
+                    if not label.ghost_name:
+                        ar.addTarget(at, len(nodes))
+                    else:
+                        continue
                 for provider in label.providers.values():
                     # This request may be supplied by this provider
                     # (and nodes from this provider supplying this
